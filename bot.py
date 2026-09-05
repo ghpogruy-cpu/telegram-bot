@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 
 # =========================================================
-# SETTINGS
+# CONFIG
 # =========================================================
 
 TOKEN = os.getenv("BOT_TOKEN", "")
@@ -100,6 +100,7 @@ def setup_database():
         )
     """)
 
+    # إضافة الماستر تلقائياً
     cur.execute("""
         INSERT OR IGNORE INTO admins
         (user_id, username, added_at)
@@ -115,7 +116,7 @@ def setup_database():
 
 
 # =========================================================
-# HELPERS
+# DATE FUNCTIONS
 # =========================================================
 
 def now():
@@ -153,9 +154,16 @@ def add_months(date_obj, months):
     )
 
 
+# =========================================================
+# VALIDATION
+# =========================================================
+
 def valid_phone(phone):
     return bool(
-        re.fullmatch(r"01[0125]\d{8}", phone)
+        re.fullmatch(
+            r"01[0125]\d{8}",
+            phone
+        )
     )
 
 
@@ -175,6 +183,7 @@ def save_user(user):
             created_at
         )
         VALUES (?, ?, ?, ?)
+
         ON CONFLICT(user_id)
         DO UPDATE SET
             username=excluded.username,
@@ -302,7 +311,9 @@ def cancel_subscription(user_id):
             subscription_end=NULL,
             reminder_sent=NULL
         WHERE user_id=?
-    """, (user_id,))
+    """, (
+        user_id,
+    ))
 
     con.commit()
     con.close()
@@ -313,6 +324,9 @@ def cancel_subscription(user_id):
 # =========================================================
 
 def is_admin(user_id):
+    if user_id == MASTER_ADMIN_ID:
+        return True
+
     con = db()
     cur = con.cursor()
 
@@ -322,6 +336,7 @@ def is_admin(user_id):
     )
 
     result = cur.fetchone()
+
     con.close()
 
     return result is not None
@@ -336,12 +351,16 @@ def get_admins():
     cur = con.cursor()
 
     cur.execute("""
-        SELECT user_id, username, added_at
+        SELECT
+            user_id,
+            username,
+            added_at
         FROM admins
         ORDER BY added_at
     """)
 
     rows = cur.fetchall()
+
     con.close()
 
     return rows
@@ -352,6 +371,7 @@ def get_admins():
 # =========================================================
 
 def admin_keyboard():
+
     return InlineKeyboardMarkup([
 
         [
@@ -406,6 +426,7 @@ def admin_keyboard():
                 "📢 إرسال للمشتركين",
                 callback_data="broadcast_paid"
             ),
+
             InlineKeyboardButton(
                 "📢 إرسال لغير المشتركين",
                 callback_data="broadcast_unpaid"
@@ -426,17 +447,21 @@ def admin_keyboard():
 # =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     user = update.effective_user
 
     save_user(user)
+
     context.user_data.clear()
 
     if is_admin(user.id):
+
         await update.message.reply_text(
             "👑 لوحة التحكم\n\n"
             "اختر العملية المطلوبة:",
             reply_markup=admin_keyboard()
         )
+
         return
 
     keyboard = InlineKeyboardMarkup([
@@ -478,15 +503,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     await update.message.reply_text(
+
         "💜 أهلاً بك\n\n"
+
         "📋 اختر مدة الاشتراك:\n\n"
+
         "1️⃣ شهر — 200 جنيه\n"
         "2️⃣ شهرين — 400 جنيه\n"
         "3️⃣ أشهر — 600 جنيه\n"
         "6️⃣ أشهر — 1200 جنيه\n"
         "🔟 سنة — 2400 جنيه\n\n"
+
         "💰 الدفع عن طريق Vodafone Cash\n"
         f"📱 الرقم: {VODAFONE_NUMBER}",
+
         reply_markup=keyboard
     )
 
@@ -496,7 +526,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def plan_callback(update, context):
+
     query = update.callback_query
+
     await query.answer()
 
     match = re.fullmatch(
@@ -508,6 +540,7 @@ async def plan_callback(update, context):
         return
 
     months = int(match.group(1))
+
     price = PLANS[months]["price"]
 
     context.user_data["months"] = months
@@ -531,12 +564,17 @@ async def plan_callback(update, context):
     ])
 
     await query.edit_message_text(
+
         "💜 تم اختيار الاشتراك\n\n"
+
         f"📅 المدة: {months} شهر\n"
         f"💰 المبلغ: {price} جنيه\n\n"
+
         "📱 قم بالتحويل على Vodafone Cash:\n"
         f"{VODAFONE_NUMBER}\n\n"
+
         "بعد التحويل اضغط «✅ تم الدفع».",
+
         reply_markup=keyboard
     )
 
@@ -546,96 +584,117 @@ async def plan_callback(update, context):
 # =========================================================
 
 async def paid_start(update, context):
+
     query = update.callback_query
+
     await query.answer()
 
     if "months" not in context.user_data:
+
         await query.message.reply_text(
             "⚠️ اختار الباقة من /start أولاً."
         )
+
         return
 
     context.user_data["state"] = "waiting_phone"
 
     await query.message.reply_text(
+
         "📱 من فضلك أرسل رقم الموبايل "
         "الذي قمت بالتحويل منه."
+
     )
 
 
 # =========================================================
-# PAYMENT MESSAGE
+# PAYMENT HANDLER
 # =========================================================
 
-async def handle_payment_message(update, context):
-    user = update.effective_user
+async def handle_text_message(update, context):
 
     if not update.message:
         return
 
-    state = context.user_data.get("state")
+    user = update.effective_user
 
-    if state == "waiting_phone":
+    text = update.message.text.strip()
 
-        phone = update.message.text.strip()
+    # -----------------------------------------------------
+    # PAYMENT PHONE
+    # -----------------------------------------------------
+
+    if context.user_data.get("state") == "waiting_phone":
+
+        phone = text
 
         if not valid_phone(phone):
+
             await update.message.reply_text(
+
                 "❌ رقم غير صحيح.\n\n"
+
                 "أرسل رقم مصري صحيح مثل:\n"
                 "01012345678"
+
             )
+
             return
 
         context.user_data["phone"] = phone
+
         context.user_data["state"] = "waiting_photo"
 
         await update.message.reply_text(
+
             "✅ تم تسجيل رقم التحويل.\n\n"
+
             "📸 الآن أرسل صورة التحويل."
+
         )
+
         return
 
-    if state == "waiting_photo":
+    # -----------------------------------------------------
+    # ADMIN TEXT
+    # -----------------------------------------------------
 
-        if not update.message.photo:
+    if not is_admin(user.id):
+        return
+
+    state = context.user_data.get("admin_state")
+
+    if not state:
+        return
+
+    # -----------------------------------------------------
+    # ADD ADMIN
+    # -----------------------------------------------------
+
+    if state == "add_admin":
+
+        try:
+            target_id = int(text)
+        except ValueError:
+
             await update.message.reply_text(
-                "📸 من فضلك أرسل صورة التحويل."
+                "❌ Telegram ID غير صحيح."
             )
+
             return
-
-        photo = update.message.photo[-1]
-
-        months = context.user_data.get("months")
-        amount = context.user_data.get("amount")
-        phone = context.user_data.get("phone")
 
         con = db()
         cur = con.cursor()
 
         cur.execute("""
-            INSERT INTO payments (
-                user_id,
-                username,
-                phone,
-                months,
-                amount,
-                photo_id,
-                status,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+            INSERT OR IGNORE INTO admins
+            (user_id, username, added_at)
+            VALUES (?, ?, ?)
         """, (
-            user.id,
-            user.username or "",
-            phone,
-            months,
-            amount,
-            photo.file_id,
-            now_text(),
+            target_id,
+            "",
+            now_text()
         ))
-
-        payment_id = cur.lastrowid
 
         con.commit()
         con.close()
@@ -643,68 +702,327 @@ async def handle_payment_message(update, context):
         context.user_data.clear()
 
         await update.message.reply_text(
-            "✅ تم إرسال طلب الدفع للإدارة.\n\n"
-            "⏳ انتظر مراجعة التحويل."
+            "✅ تم إضافة الأدمن.",
+            reply_markup=admin_keyboard()
         )
-
-        name = (
-            f"@{user.username}"
-            if user.username
-            else user.first_name or "بدون اسم"
-        )
-
-        admin_text = (
-            "💰 طلب دفع جديد\n\n"
-            f"🆔 الطلب: #{payment_id}\n"
-            f"👤 المستخدم: {name}\n"
-            f"🆔 Telegram ID: {user.id}\n"
-            f"📱 رقم التحويل: {phone}\n"
-            f"📅 المدة: {months} شهر\n"
-            f"💵 المبلغ: {amount} جنيه"
-        )
-
-        keyboard = InlineKeyboardMarkup([
-
-            [
-                InlineKeyboardButton(
-                    "✅ تأكيد الدفع",
-                    callback_data=f"approve_{payment_id}"
-                ),
-
-                InlineKeyboardButton(
-                    "❌ رفض الدفع",
-                    callback_data=f"reject_{payment_id}"
-                ),
-            ],
-        ])
-
-        try:
-            await context.bot.send_photo(
-                chat_id=MASTER_ADMIN_ID,
-                photo=photo.file_id,
-                caption=admin_text,
-                reply_markup=keyboard
-            )
-        except Exception as e:
-            logging.error(
-                f"Payment notification error: {e}"
-            )
 
         return
 
+    # -----------------------------------------------------
+    # DELETE ADMIN
+    # -----------------------------------------------------
+
+    if state == "delete_admin":
+
+        try:
+            target_id = int(text)
+
+        except ValueError:
+
+            await update.message.reply_text(
+                "❌ Telegram ID غير صحيح."
+            )
+
+            return
+
+        if target_id == MASTER_ADMIN_ID:
+
+            await update.message.reply_text(
+                "❌ لا يمكن حذف الماستر."
+            )
+
+            return
+
+        con = db()
+        cur = con.cursor()
+
+        cur.execute(
+            "DELETE FROM admins WHERE user_id=?",
+            (target_id,)
+        )
+
+        con.commit()
+        con.close()
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "🗑 تم حذف الأدمن.",
+            reply_markup=admin_keyboard()
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ADD USER
+    # -----------------------------------------------------
+
+    if state == "add_user":
+
+        try:
+            target_id = int(text)
+
+        except ValueError:
+
+            await update.message.reply_text(
+                "❌ Telegram ID غير صحيح."
+            )
+
+            return
+
+        add_user_manual(target_id)
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "✅ تم إضافة التاجر.",
+            reply_markup=admin_keyboard()
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # DELETE USER
+    # -----------------------------------------------------
+
+    if state == "delete_user":
+
+        try:
+            target_id = int(text)
+
+        except ValueError:
+
+            await update.message.reply_text(
+                "❌ Telegram ID غير صحيح."
+            )
+
+            return
+
+        delete_user(target_id)
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "🗑 تم حذف التاجر.",
+            reply_markup=admin_keyboard()
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # CANCEL SUBSCRIPTION
+    # -----------------------------------------------------
+
+    if state == "cancel_sub":
+
+        try:
+            target_id = int(text)
+
+        except ValueError:
+
+            await update.message.reply_text(
+                "❌ Telegram ID غير صحيح."
+            )
+
+            return
+
+        cancel_subscription(target_id)
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "🚫 تم إلغاء الاشتراك.",
+            reply_markup=admin_keyboard()
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # BROADCAST
+    # -----------------------------------------------------
+
+    if state.startswith("broadcast_"):
+
+        if state == "broadcast_all":
+            users = get_all_users()
+
+        elif state == "broadcast_paid":
+            users = get_paid_users()
+
+        else:
+            users = get_unpaid_users()
+
+        sent = 0
+
+        for row in users:
+
+            try:
+
+                await context.bot.send_message(
+                    chat_id=row[0],
+                    text=text
+                )
+
+                sent += 1
+
+                await asyncio.sleep(0.05)
+
+            except Exception:
+                pass
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+
+            f"📢 تم الإرسال إلى {sent} مستخدم.",
+
+            reply_markup=admin_keyboard()
+        )
+
 
 # =========================================================
-# PAYMENT ACTION
+# PHOTO HANDLER
+# =========================================================
+
+async def handle_photo_message(update, context):
+
+    if not update.message:
+        return
+
+    user = update.effective_user
+
+    # لازم يكون في مرحلة إرسال صورة التحويل
+    if context.user_data.get("state") != "waiting_photo":
+        return
+
+    photo = update.message.photo[-1]
+
+    months = context.user_data.get("months")
+    amount = context.user_data.get("amount")
+    phone = context.user_data.get("phone")
+
+    if not months or not amount or not phone:
+
+        await update.message.reply_text(
+            "⚠️ حدث خطأ. استخدم /start وابدأ الطلب من جديد."
+        )
+
+        context.user_data.clear()
+
+        return
+
+    con = db()
+    cur = con.cursor()
+
+    cur.execute("""
+        INSERT INTO payments (
+            user_id,
+            username,
+            phone,
+            months,
+            amount,
+            photo_id,
+            status,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    """, (
+        user.id,
+        user.username or "",
+        phone,
+        months,
+        amount,
+        photo.file_id,
+        now_text(),
+    ))
+
+    payment_id = cur.lastrowid
+
+    con.commit()
+    con.close()
+
+    context.user_data.clear()
+
+    await update.message.reply_text(
+
+        "✅ تم إرسال طلب الدفع للإدارة.\n\n"
+        "⏳ انتظر مراجعة التحويل."
+
+    )
+
+    name = (
+        f"@{user.username}"
+        if user.username
+        else user.first_name or "بدون اسم"
+    )
+
+    admin_text = (
+
+        "💰 طلب دفع جديد\n\n"
+
+        f"🆔 الطلب: #{payment_id}\n"
+        f"👤 المستخدم: {name}\n"
+        f"🆔 Telegram ID: {user.id}\n"
+        f"📱 رقم التحويل: {phone}\n"
+        f"📅 المدة: {months} شهر\n"
+        f"💵 المبلغ: {amount} جنيه"
+
+    )
+
+    keyboard = InlineKeyboardMarkup([
+
+        [
+
+            InlineKeyboardButton(
+                "✅ تأكيد الدفع",
+                callback_data=f"approve_{payment_id}"
+            ),
+
+            InlineKeyboardButton(
+                "❌ رفض الدفع",
+                callback_data=f"reject_{payment_id}"
+            ),
+
+        ]
+
+    ])
+
+    try:
+
+        await context.bot.send_photo(
+
+            chat_id=MASTER_ADMIN_ID,
+
+            photo=photo.file_id,
+
+            caption=admin_text,
+
+            reply_markup=keyboard
+
+        )
+
+    except Exception as e:
+
+        logging.error(
+            f"Payment notification error: {e}"
+        )
+
+
+# =========================================================
+# PAYMENT APPROVE / REJECT
 # =========================================================
 
 async def payment_action(update, context):
+
     query = update.callback_query
 
     if not is_master(query.from_user.id):
+
         await query.answer(
             "❌ الماستر فقط.",
             show_alert=True
         )
+
         return
 
     await query.answer()
@@ -718,6 +1036,7 @@ async def payment_action(update, context):
         return
 
     action = match.group(1)
+
     payment_id = int(match.group(2))
 
     con = db()
@@ -732,11 +1051,14 @@ async def payment_action(update, context):
             status
         FROM payments
         WHERE id=?
-    """, (payment_id,))
+    """, (
+        payment_id,
+    ))
 
     payment = cur.fetchone()
 
     if not payment:
+
         con.close()
         return
 
@@ -746,6 +1068,7 @@ async def payment_action(update, context):
     status = payment[4]
 
     if status != "pending":
+
         con.close()
         return
 
@@ -759,29 +1082,40 @@ async def payment_action(update, context):
             UPDATE payments
             SET status='rejected'
             WHERE id=?
-        """, (payment_id,))
+        """, (
+            payment_id,
+        ))
 
         con.commit()
         con.close()
 
         try:
+
             await query.edit_message_caption(
+
                 caption=(
                     "❌ تم رفض طلب الدفع\n\n"
                     f"🆔 الطلب: #{payment_id}"
                 )
+
             )
+
         except Exception:
             pass
 
         try:
+
             await context.bot.send_message(
+
                 chat_id=user_id,
+
                 text=(
                     "❌ تم رفض إثبات الدفع.\n\n"
                     "يمكنك إرسال طلب جديد من /start."
                 )
+
             )
+
         except Exception:
             pass
 
@@ -795,7 +1129,9 @@ async def payment_action(update, context):
         SELECT subscription_end
         FROM users
         WHERE user_id=?
-    """, (user_id,))
+    """, (
+        user_id,
+    ))
 
     row = cur.fetchone()
 
@@ -805,15 +1141,18 @@ async def payment_action(update, context):
 
         try:
             old_end = datetime.fromisoformat(row[0])
+
         except Exception:
             old_end = current
 
         if old_end > current:
             start_date = old_end
+
         else:
             start_date = current
 
     else:
+
         start_date = current
 
     end_date = add_months(
@@ -821,6 +1160,7 @@ async def payment_action(update, context):
         months
     )
 
+    # تحديث الدفع
     cur.execute("""
         UPDATE payments
         SET
@@ -832,6 +1172,7 @@ async def payment_action(update, context):
         payment_id
     ))
 
+    # تحديث الاشتراك
     cur.execute("""
         UPDATE users
         SET
@@ -846,6 +1187,7 @@ async def payment_action(update, context):
         user_id
     ))
 
+    # تسجيل المبلغ في شهر الدفع الفعلي
     cur.execute("""
         INSERT INTO monthly_payments (
             user_id,
@@ -869,29 +1211,49 @@ async def payment_action(update, context):
     con.close()
 
     try:
+
         await query.edit_message_caption(
+
             caption=(
+
                 "✅ تم تأكيد الدفع\n\n"
+
                 f"🆔 الطلب: #{payment_id}\n"
                 f"💰 المبلغ: {amount} جنيه\n"
                 f"📅 من: {start_date.strftime('%Y/%m/%d')}\n"
                 f"📅 إلى: {end_date.strftime('%Y/%m/%d')}"
+
             )
+
         )
+
     except Exception:
         pass
 
     try:
+
         await context.bot.send_message(
+
             chat_id=user_id,
+
             text=(
+
                 "🎉 تم تأكيد اشتراكك بنجاح!\n\n"
+
                 f"💰 المبلغ: {amount} جنيه\n"
-                f"📅 يبدأ: {start_date.strftime('%Y/%m/%d')}\n"
-                f"📅 ينتهي: {end_date.strftime('%Y/%m/%d')}\n\n"
+
+                f"📅 يبدأ: "
+                f"{start_date.strftime('%Y/%m/%d')}\n"
+
+                f"📅 ينتهي: "
+                f"{end_date.strftime('%Y/%m/%d')}\n\n"
+
                 "💜 شكراً لاشتراكك."
+
             )
+
         )
+
     except Exception:
         pass
 
@@ -901,12 +1263,15 @@ async def payment_action(update, context):
 # =========================================================
 
 async def show_users(update, rows, title):
+
     query = update.callback_query
 
     if not rows:
+
         await query.message.reply_text(
             f"{title}\n\nلا يوجد مستخدمون."
         )
+
         return
 
     text = f"{title}\n\n"
@@ -929,14 +1294,18 @@ async def show_users(update, rows, title):
         status = "✅" if paid else "❌"
 
         text += (
+
             f"{i}. {status} {name}\n"
             f"🆔 {user_id}\n"
             f"📅 {format_date(start)} → "
             f"{format_date(end)}\n\n"
+
         )
 
         if len(text) > 3500:
+
             await query.message.reply_text(text)
+
             text = ""
 
     if text:
@@ -944,10 +1313,11 @@ async def show_users(update, rows, title):
 
 
 # =========================================================
-# MONTHLY REPORTS
+# REPORTS
 # =========================================================
 
 def report_month_keyboard():
+
     current = now()
 
     buttons = []
@@ -957,20 +1327,28 @@ def report_month_keyboard():
         index = current.month - 1 - i
 
         year = current.year + index // 12
+
         month = index % 12 + 1
 
         buttons.append([
+
             InlineKeyboardButton(
+
                 f"{month:02d}/{year}",
+
                 callback_data=f"month_{year}_{month}"
+
             )
+
         ])
 
     buttons.append([
+
         InlineKeyboardButton(
             "🔙 رجوع",
             callback_data="admin_home"
         )
+
     ])
 
     return InlineKeyboardMarkup(buttons)
@@ -994,10 +1372,9 @@ def month_stats(year, month):
 
     paid_count, total = cur.fetchone()
 
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM users
-    """)
+    cur.execute(
+        "SELECT COUNT(*) FROM users"
+    )
 
     all_count = cur.fetchone()[0]
 
@@ -1038,6 +1415,7 @@ def month_paid_users(year, month):
     ))
 
     rows = cur.fetchall()
+
     con.close()
 
     return rows
@@ -1068,22 +1446,29 @@ def month_unpaid_users(year, month):
     ))
 
     rows = cur.fetchall()
+
     con.close()
 
     return rows
 
 
 async def reports_menu(update, context):
+
     query = update.callback_query
 
     await query.edit_message_text(
+
         "📊 اختر الشهر:",
+
         reply_markup=report_month_keyboard()
+
     )
 
 
 async def month_report(update, context):
+
     query = update.callback_query
+
     await query.answer()
 
     match = re.fullmatch(
@@ -1097,37 +1482,59 @@ async def month_report(update, context):
     year = int(match.group(1))
     month = int(match.group(2))
 
-    all_count, paid_count, unpaid_count, total = (
-        month_stats(year, month)
+    (
+        all_count,
+        paid_count,
+        unpaid_count,
+        total
+    ) = month_stats(
+        year,
+        month
     )
 
     keyboard = InlineKeyboardMarkup([
 
         [
             InlineKeyboardButton(
+
                 f"👥 كل التجار ({all_count})",
-                callback_data=f"m_all_{year}_{month}"
+
+                callback_data=
+                f"m_all_{year}_{month}"
+
             )
         ],
 
         [
             InlineKeyboardButton(
+
                 f"✅ دفعوا ({paid_count})",
-                callback_data=f"m_paid_{year}_{month}"
+
+                callback_data=
+                f"m_paid_{year}_{month}"
+
             )
         ],
 
         [
             InlineKeyboardButton(
+
                 f"❌ ما دفعوش ({unpaid_count})",
-                callback_data=f"m_unpaid_{year}_{month}"
+
+                callback_data=
+                f"m_unpaid_{year}_{month}"
+
             )
         ],
 
         [
             InlineKeyboardButton(
+
                 f"💰 الإجمالي: {total} جنيه",
-                callback_data=f"m_total_{year}_{month}"
+
+                callback_data=
+                f"m_total_{year}_{month}"
+
             )
         ],
 
@@ -1140,26 +1547,39 @@ async def month_report(update, context):
     ])
 
     await query.edit_message_text(
+
         f"📊 تقرير شهر {month:02d}/{year}\n\n"
+
         f"👥 إجمالي التجار: {all_count}\n"
         f"✅ دفعوا: {paid_count}\n"
         f"❌ ما دفعوش: {unpaid_count}\n"
         f"💰 إجمالي المدفوع: {total} جنيه",
+
         reply_markup=keyboard
     )
 
 
 async def month_details(update, context):
+
     query = update.callback_query
+
     await query.answer()
 
     parts = query.data.split("_")
 
     kind = parts[1]
+
     year = int(parts[2])
+
     month = int(parts[3])
 
-    title = f"📅 شهر {month:02d}/{year}\n\n"
+    title = (
+        f"📅 شهر {month:02d}/{year}\n\n"
+    )
+
+    # -----------------------------------------------------
+    # PAID
+    # -----------------------------------------------------
 
     if kind == "paid":
 
@@ -1169,9 +1589,14 @@ async def month_details(update, context):
         )
 
         if not rows:
+
             await query.message.reply_text(
-                title + "لا يوجد أشخاص دفعوا."
+
+                title +
+                "لا يوجد أشخاص دفعوا."
+
             )
+
             return
 
         text = title
@@ -1190,14 +1615,22 @@ async def month_details(update, context):
             )
 
             text += (
+
                 f"{i}. ✅ {name}\n"
                 f"🆔 {user_id}\n"
                 f"💰 {amount} جنيه\n\n"
+
             )
 
         await query.message.reply_text(text)
 
-    elif kind == "unpaid":
+        return
+
+    # -----------------------------------------------------
+    # UNPAID
+    # -----------------------------------------------------
+
+    if kind == "unpaid":
 
         rows = month_unpaid_users(
             year,
@@ -1205,9 +1638,14 @@ async def month_details(update, context):
         )
 
         if not rows:
+
             await query.message.reply_text(
-                title + "كل التجار دفعوا. ✅"
+
+                title +
+                "كل التجار دفعوا. ✅"
+
             )
+
             return
 
         text = title
@@ -1225,21 +1663,40 @@ async def month_details(update, context):
             )
 
             text += (
+
                 f"{i}. ❌ {name}\n"
                 f"🆔 {user_id}\n\n"
+
             )
 
         await query.message.reply_text(text)
 
-    elif kind == "all":
+        return
+
+    # -----------------------------------------------------
+    # ALL
+    # -----------------------------------------------------
+
+    if kind == "all":
 
         await show_users(
+
             update,
+
             get_all_users(),
-            f"👥 كل التجار - {month:02d}/{year}"
+
+            f"👥 كل التجار - "
+            f"{month:02d}/{year}"
+
         )
 
-    elif kind == "total":
+        return
+
+    # -----------------------------------------------------
+    # TOTAL
+    # -----------------------------------------------------
+
+    if kind == "total":
 
         _, paid, _, total = month_stats(
             year,
@@ -1247,9 +1704,12 @@ async def month_details(update, context):
         )
 
         await query.message.reply_text(
+
             f"💰 تقرير {month:02d}/{year}\n\n"
+
             f"👥 عدد المدفوعات: {paid}\n"
             f"💵 الإجمالي: {total} جنيه"
+
         )
 
 
@@ -1258,13 +1718,16 @@ async def month_details(update, context):
 # =========================================================
 
 async def manage_admins(update, context):
+
     query = update.callback_query
 
     if not is_master(query.from_user.id):
+
         await query.answer(
             "❌ الماستر فقط.",
             show_alert=True
         )
+
         return
 
     admins = get_admins()
@@ -1274,12 +1737,14 @@ async def manage_admins(update, context):
     for i, admin in enumerate(admins, 1):
 
         user_id = admin[0]
+
         username = admin[1]
 
-        if user_id == MASTER_ADMIN_ID:
-            role = "👑 Master"
-        else:
-            role = "🛡 Admin"
+        role = (
+            "👑 Master"
+            if user_id == MASTER_ADMIN_ID
+            else "🛡 Admin"
+        )
 
         name = (
             f"@{username}"
@@ -1288,9 +1753,11 @@ async def manage_admins(update, context):
         )
 
         text += (
+
             f"{i}. {role}\n"
             f"{name}\n"
             f"🆔 {user_id}\n\n"
+
         )
 
     keyboard = InlineKeyboardMarkup([
@@ -1299,38 +1766,44 @@ async def manage_admins(update, context):
             InlineKeyboardButton(
                 "➕ إضافة أدمن",
                 callback_data="add_admin"
-            ),
+            )
         ],
 
         [
             InlineKeyboardButton(
                 "🗑 حذف أدمن",
                 callback_data="delete_admin"
-            ),
+            )
         ],
 
         [
             InlineKeyboardButton(
                 "🔙 رجوع",
                 callback_data="admin_home"
-            ),
+            )
         ],
     ])
 
     await query.edit_message_text(
+
         text,
+
         reply_markup=keyboard
+
     )
 
 
 async def admin_management_action(update, context):
+
     query = update.callback_query
 
     if not is_master(query.from_user.id):
+
         await query.answer(
             "❌ الماستر فقط.",
             show_alert=True
         )
+
         return
 
     await query.answer()
@@ -1340,7 +1813,9 @@ async def admin_management_action(update, context):
         context.user_data["admin_state"] = "add_admin"
 
         await query.message.reply_text(
+
             "👑 أرسل Telegram ID للأدمن الجديد."
+
         )
 
     elif query.data == "delete_admin":
@@ -1348,208 +1823,9 @@ async def admin_management_action(update, context):
         context.user_data["admin_state"] = "delete_admin"
 
         await query.message.reply_text(
+
             "🗑 أرسل Telegram ID للأدمن الذي تريد حذفه."
-        )
 
-
-# =========================================================
-# ADMIN TEXT ACTIONS
-# =========================================================
-
-async def handle_admin_text(update, context):
-
-    user = update.effective_user
-
-    if not is_admin(user.id):
-        return
-
-    state = context.user_data.get("admin_state")
-
-    if not state:
-        return
-
-    text = update.message.text.strip()
-
-    # ADD ADMIN
-    if state == "add_admin":
-
-        try:
-            target_id = int(text)
-        except ValueError:
-
-            await update.message.reply_text(
-                "❌ Telegram ID غير صحيح."
-            )
-            return
-
-        con = db()
-        cur = con.cursor()
-
-        cur.execute("""
-            INSERT OR IGNORE INTO admins
-            (user_id, username, added_at)
-            VALUES (?, ?, ?)
-        """, (
-            target_id,
-            "",
-            now_text()
-        ))
-
-        con.commit()
-        con.close()
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            "✅ تم إضافة الأدمن.",
-            reply_markup=admin_keyboard()
-        )
-
-        return
-
-    # DELETE ADMIN
-    if state == "delete_admin":
-
-        try:
-            target_id = int(text)
-        except ValueError:
-
-            await update.message.reply_text(
-                "❌ Telegram ID غير صحيح."
-            )
-            return
-
-        if target_id == MASTER_ADMIN_ID:
-
-            await update.message.reply_text(
-                "❌ لا يمكن حذف الماستر."
-            )
-            return
-
-        con = db()
-        cur = con.cursor()
-
-        cur.execute(
-            "DELETE FROM admins WHERE user_id=?",
-            (target_id,)
-        )
-
-        con.commit()
-        con.close()
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            "🗑 تم حذف الأدمن.",
-            reply_markup=admin_keyboard()
-        )
-
-        return
-
-    # ADD USER
-    if state == "add_user":
-
-        try:
-            target_id = int(text)
-        except ValueError:
-
-            await update.message.reply_text(
-                "❌ Telegram ID غير صحيح."
-            )
-            return
-
-        add_user_manual(target_id)
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            "✅ تم إضافة التاجر.",
-            reply_markup=admin_keyboard()
-        )
-
-        return
-
-    # DELETE USER
-    if state == "delete_user":
-
-        try:
-            target_id = int(text)
-        except ValueError:
-
-            await update.message.reply_text(
-                "❌ Telegram ID غير صحيح."
-            )
-            return
-
-        delete_user(target_id)
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            "🗑 تم حذف التاجر.",
-            reply_markup=admin_keyboard()
-        )
-
-        return
-
-    # CANCEL SUB
-    if state == "cancel_sub":
-
-        try:
-            target_id = int(text)
-        except ValueError:
-
-            await update.message.reply_text(
-                "❌ Telegram ID غير صحيح."
-            )
-            return
-
-        cancel_subscription(target_id)
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            "🚫 تم إلغاء الاشتراك.",
-            reply_markup=admin_keyboard()
-        )
-
-        return
-
-    # BROADCAST
-    if state.startswith("broadcast_"):
-
-        if state == "broadcast_all":
-            users = get_all_users()
-
-        elif state == "broadcast_paid":
-            users = get_paid_users()
-
-        else:
-            users = get_unpaid_users()
-
-        sent = 0
-
-        for row in users:
-
-            try:
-
-                await context.bot.send_message(
-                    chat_id=row[0],
-                    text=text
-                )
-
-                sent += 1
-
-                await asyncio.sleep(0.05)
-
-            except Exception:
-                pass
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            f"📢 تم الإرسال إلى {sent} مستخدم.",
-            reply_markup=admin_keyboard()
         )
 
 
@@ -1558,61 +1834,100 @@ async def handle_admin_text(update, context):
 # =========================================================
 
 async def callback_router(update, context):
+
     query = update.callback_query
+
     data = query.data
 
+    # Plans
     if re.fullmatch(
         r"plan_(1|2|3|6|12)",
         data
     ):
-        await plan_callback(update, context)
+
+        await plan_callback(
+            update,
+            context
+        )
+
         return
 
+    # Payment start
     if data == "paid_start":
-        await paid_start(update, context)
+
+        await paid_start(
+            update,
+            context
+        )
+
         return
 
+    # Approve / reject
     if re.fullmatch(
         r"(approve|reject)_\d+",
         data
     ):
-        await payment_action(update, context)
+
+        await payment_action(
+            update,
+            context
+        )
+
         return
 
+    # Month
     if re.fullmatch(
         r"month_\d{4}_\d{1,2}",
         data
     ):
-        await month_report(update, context)
+
+        await month_report(
+            update,
+            context
+        )
+
         return
 
+    # Month details
     if re.fullmatch(
         r"m_(all|paid|unpaid|total)_\d{4}_\d{1,2}",
         data
     ):
-        await month_details(update, context)
+
+        await month_details(
+            update,
+            context
+        )
+
         return
 
+    # Admin protection
     if not is_admin(query.from_user.id):
 
         await query.answer(
             "❌ غير مسموح.",
             show_alert=True
         )
+
         return
 
     await query.answer()
 
+    # Admin home
     if data == "admin_home":
 
         await query.edit_message_text(
+
             "👑 لوحة التحكم\n\n"
             "اختر العملية المطلوبة:",
+
             reply_markup=admin_keyboard()
+
         )
 
         return
 
+    # Back
     if data == "back_start":
 
         await query.message.reply_text(
@@ -1621,6 +1936,7 @@ async def callback_router(update, context):
 
         return
 
+    # All users
     if data == "all_users":
 
         await show_users(
@@ -1631,6 +1947,7 @@ async def callback_router(update, context):
 
         return
 
+    # Paid users
     if data == "paid_users":
 
         await show_users(
@@ -1641,6 +1958,7 @@ async def callback_router(update, context):
 
         return
 
+    # Unpaid users
     if data == "unpaid_users":
 
         await show_users(
@@ -1651,77 +1969,109 @@ async def callback_router(update, context):
 
         return
 
+    # Reports
     if data == "reports":
 
-        await reports_menu(update, context)
+        await reports_menu(
+            update,
+            context
+        )
+
         return
 
+    # Add user
     if data == "add_user":
 
         context.user_data["admin_state"] = "add_user"
 
         await query.message.reply_text(
+
             "➕ أرسل Telegram ID للتاجر."
+
         )
 
         return
 
+    # Delete user
     if data == "delete_user":
 
         context.user_data["admin_state"] = "delete_user"
 
         await query.message.reply_text(
+
             "🗑 أرسل Telegram ID للتاجر."
+
         )
 
         return
 
+    # Cancel subscription
     if data == "cancel_sub":
 
         context.user_data["admin_state"] = "cancel_sub"
 
         await query.message.reply_text(
+
             "🚫 أرسل Telegram ID لإلغاء اشتراكه."
+
         )
 
         return
 
+    # Broadcast all
     if data == "broadcast_all":
 
         context.user_data["admin_state"] = "broadcast_all"
 
         await query.message.reply_text(
+
             "📢 أرسل الرسالة."
+
         )
 
         return
 
+    # Broadcast paid
     if data == "broadcast_paid":
 
         context.user_data["admin_state"] = "broadcast_paid"
 
         await query.message.reply_text(
+
             "📢 أرسل الرسالة للمشتركين."
+
         )
 
         return
 
+    # Broadcast unpaid
     if data == "broadcast_unpaid":
 
         context.user_data["admin_state"] = "broadcast_unpaid"
 
         await query.message.reply_text(
+
             "📢 أرسل الرسالة لغير المشتركين."
+
         )
 
         return
 
+    # Manage admins
     if data == "manage_admins":
 
-        await manage_admins(update, context)
+        await manage_admins(
+            update,
+            context
+        )
+
         return
 
-    if data in ("add_admin", "delete_admin"):
+    # Add / delete admin
+    if data in (
+        "add_admin",
+        "delete_admin"
+    ):
 
         await admin_management_action(
             update,
@@ -1758,52 +2108,83 @@ async def reminder_loop(application):
 
             current = now()
 
-            for user_id, end_text, reminder_sent in users:
+            for (
+                user_id,
+                end_text,
+                reminder_sent
+            ) in users:
 
                 try:
+
                     end_date = datetime.fromisoformat(
                         end_text
                     )
+
                 except Exception:
+
                     continue
 
-                remaining = end_date - current
+                remaining = (
+                    end_date - current
+                )
 
+                # انتهى
                 if remaining.total_seconds() <= 0:
 
                     cur.execute("""
                         UPDATE users
                         SET paid=0
                         WHERE user_id=?
-                    """, (user_id,))
+                    """, (
+                        user_id,
+                    ))
 
                     try:
+
                         await application.bot.send_message(
+
                             chat_id=user_id,
+
                             text=(
+
                                 "❌ انتهى اشتراكك.\n\n"
                                 "للتجديد اضغط /start"
+
                             )
+
                         )
+
                     except Exception:
                         pass
 
                     continue
 
+                # خلال 3 أيام
                 if remaining <= timedelta(days=3):
 
-                    today = current.strftime("%Y-%m-%d")
+                    today = current.strftime(
+                        "%Y-%m-%d"
+                    )
 
                     if reminder_sent != today:
 
                         try:
+
                             await application.bot.send_message(
+
                                 chat_id=user_id,
+
                                 text=(
-                                    "⚠️ اشتراكك هينتهي خلال 3 أيام.\n\n"
+
+                                    "⚠️ اشتراكك هينتهي "
+                                    "خلال 3 أيام.\n\n"
+
                                     "للتجديد اضغط /start"
+
                                 )
+
                             )
+
                         except Exception:
                             pass
 
@@ -1844,19 +2225,33 @@ async def post_init(application):
 def main():
 
     if not TOKEN:
-        print("❌ BOT_TOKEN غير موجود.")
-        print("ضع التوكن في Environment Variable باسم BOT_TOKEN.")
+
+        print(
+            "❌ BOT_TOKEN غير موجود."
+        )
+
+        print(
+            "ضع التوكن في Environment Variable "
+            "باسم BOT_TOKEN."
+        )
+
         return
 
     setup_database()
 
     application = (
+
         Application.builder()
+
         .token(TOKEN)
+
         .post_init(post_init)
+
         .build()
+
     )
 
+    # /start
     application.add_handler(
         CommandHandler(
             "start",
@@ -1864,30 +2259,39 @@ def main():
         )
     )
 
+    # Buttons
     application.add_handler(
         CallbackQueryHandler(
             callback_router
         )
     )
 
+    # Photos
     application.add_handler(
         MessageHandler(
             filters.PHOTO,
-            handle_payment_message
+            handle_photo_message
         )
     )
 
+    # Text
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_admin_text
+            handle_text_message
         )
     )
 
     print("==============================")
     print("✅ البوت يعمل الآن")
-    print(f"👑 Master Admin: {MASTER_ADMIN_ID}")
-    print(f"💜 Vodafone: {VODAFONE_NUMBER}")
+    print(
+        f"👑 Master Admin: "
+        f"{MASTER_ADMIN_ID}"
+    )
+    print(
+        f"💜 Vodafone: "
+        f"{VODAFONE_NUMBER}"
+    )
     print("📅 Monthly Reports: ON")
     print("==============================")
 
@@ -1895,6 +2299,10 @@ def main():
         drop_pending_updates=True
     )
 
+
+# =========================================================
+# RUN
+# =========================================================
 
 if __name__ == "__main__":
     main()
